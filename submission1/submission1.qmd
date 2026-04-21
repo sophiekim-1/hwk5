@@ -1,0 +1,204 @@
+---
+title: "ECON 470 Homework 5"
+subtitle: "Submission 1, Spring 2026"
+author: "Sophie Kim"
+format:
+  pdf:
+    output-file: "kim-s-hwk5-1"
+    output-ext:  "pdf"
+    header-includes:
+      - \usepackage{float}
+      - \floatplacement{table}{H}
+---
+
+```{r}
+#| include: false
+
+# Preliminaries -----------------------------------------------------------
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, ggplot2, dplyr, lubridate, haven)
+```
+
+```{r}
+#| include: false
+
+data <- read_csv("../data/output/combined_hcris_mcaid.csv")
+```
+
+
+## Problem 1
+
+```{r}
+#| echo: false
+#| warning: false
+
+mean_uncomp <- data %>%
+  filter(year >= 2010, year <= 2018) %>%
+  group_by(year) %>%
+  summarise(mean_uncomp_care = mean(tot_uncomp_care_charges, na.rm = TRUE) / 1e6) %>%
+  mutate(mean_uncomp_care = round(mean_uncomp_care, 3))
+
+print(mean_uncomp)
+```
+\newpage
+## Problem 2 
+
+```{r}
+#| echo: false
+#| warning: false
+
+data_filtered <- data %>%
+filter(year >= 2010, year <= 2018) %>%
+  mutate(expand_group = case_when(
+    expanded == FALSE ~ "Never Expanded",
+    as.Date(date_adopted) == as.Date("2014-01-01") ~ "2014 Expanded"
+  )) %>%
+  filter(!is.na(expand_group))
+
+data_filtered %>%
+  group_by(year, expand_group) %>%
+  summarise(mean_uncomp = mean(tot_uncomp_care_charges, na.rm = TRUE) / 1e6) %>%
+  ggplot(aes(x = year, y = mean_uncomp, color = expand_group)) +
+  geom_line() + geom_point() +
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(x = "Year", y = "Mean Uncompensated Care ($ Millions)", color = "Group")
+```
+
+\newpage
+## Problem 3
+
+```{r}
+#| echo: false
+#| warning: false
+
+data_filtered %>%
+  filter(year %in% c(2012, 2015)) %>%
+  group_by(expand_group, year) %>%
+  summarise(mean_uncomp = mean(tot_uncomp_care_charges, na.rm = TRUE) / 1e6) %>%
+  pivot_wider(names_from = year, values_from = mean_uncomp) %>%
+  mutate(diff = `2015` - `2012`)
+
+data_filtered$diff[data_filtered$expand_group == "2014 Expanded"] - data_filtered$diff[data_filtered$expand_group == "Never Expanded"]
+```
+
+\newpage
+## Problem 4
+
+Medicaid expansion decreases uncompensated care which is expected since Medicaid expansion extends coverage to a larger population. Hospitals can file for billing through Medicaid as more patients will be insured, and the volume of charity care or debt will decrease. 
+
+\newpage
+## Problem 5
+
+```{r}
+#| include: false
+
+library(tidyverse)
+library(fixest)
+library(modelsummary)
+```
+
+```{r}
+#| echo: false
+#| warning: false
+
+reg_dat <- data %>%
+  filter(as.Date(date_adopted) == as.Date("2014-01-01") | is.na(date_adopted)) %>%
+  mutate(
+    post  = (year >= 2014),
+    treat = post * expanded
+  )
+
+m_dd <- lm(tot_uncomp_care_charges / 1e6 ~ post + expanded + treat, data = reg_dat)
+summary(m_dd)
+```
+
+\newpage
+## Problem 6
+
+```{r}
+#| echo: false
+#| warning: false
+
+# Question 6: DD with hospital and year fixed effects (fixest)
+m_fe <- feols(tot_uncomp_care_charges / 1e6 ~ post + expanded + treat | provider_number + year,
+              cluster = ~ state,
+              data = reg_dat)
+
+modelsummary(list("DD" = m_dd, "DD + FE" = m_fe),
+             gof_map = NA,
+             coef_omit = "Intercept",
+             vcov = list(~ state, ~ state))
+
+summary(m_fe)
+```
+
+\newpage
+## Problem 7
+
+```{r}
+#| echo: false
+#| warning: false
+
+# Question 7: Same as Q6 but include ALL states (all expanders)
+reg_dat_all <- data %>%
+  filter(year >= 2010, year <= 2018) %>%
+  mutate(
+    post  = (year >= 2014),
+    treat = post * expanded
+  )
+
+m_fe_all <- feols(tot_uncomp_care_charges / 1e6 ~ post + expanded + treat | provider_number + year,
+                  cluster = ~ state,
+                  data = reg_dat_all)
+
+modelsummary(list("DD + FE (2014 only)" = m_fe, "DD + FE (All States)" = m_fe_all),
+             gof_map = NA,
+             coef_omit = "Intercept",
+             vcov = list(~ state, ~ state))
+
+summary(m_fe_all)
+```
+
+\newpage
+## Problem 8
+
+```{r}
+#| echo: false
+#| warning: false
+
+mod_es <- feols(tot_uncomp_care_charges / 1e6 ~ i(year, expanded, ref = 2013) | provider_number + year,
+                cluster = ~ state,
+                data = reg_dat)
+
+iplot(mod_es, xlab = "Year", main = "Event Study: Medicaid Expansion (2014 Expandeds vs Never)")
+```
+
+\newpage
+## Problem 9
+
+```{r}
+#| echo: false
+#| warning: false
+
+# Question 9: Event study with all states, event time variable, binned endpoints
+reg_dat_full <- data %>%
+  filter(year >= 2010, year <= 2018) %>%
+  mutate(
+    expand_year   = year(as.Date(date_adopted)),
+    time_to_treat = ifelse(expanded == FALSE, 0, year - expand_year),
+    time_to_treat = ifelse(time_to_treat < -3, -3, time_to_treat),  # bin left at -3
+    time_to_treat = ifelse(time_to_treat > 5, 5, time_to_treat)     # bin right at +5
+  )
+
+mod_es_full <- feols(tot_uncomp_care_charges / 1e6 ~ i(time_to_treat, expanded, ref = -1) | provider_number + year,
+                     cluster = ~ state,
+                     data = reg_dat_full)
+
+iplot(mod_es_full, xlab = "Time to Treatment", main = "Event Study: All States")
+```
+
+\newpage
+## Problem 10
+
+Results show that Medicaid expansion reduces hospital uncompensated care, with effects growing larger over time. The post 2014 downward trend is seen in both event study graphs but the pre-trends in the graphs are not flat, which means we should be cautious interpreting the results as it may be due to an already downward trend. One limitation of the TWFE estimator is that it can be biased when states expand Medicaid at different times. 
+
